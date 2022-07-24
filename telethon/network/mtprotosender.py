@@ -1,4 +1,3 @@
-
 import asyncio
 import collections
 import struct
@@ -46,7 +45,7 @@ class MTProtoSender:
     def __init__(self, auth_key, *, loggers,
                  retries=5, delay=1, auto_reconnect=True, connect_timeout=None,
                  auth_key_callback=None,
-                 updates_queue=None, auto_reconnect_callback=None):
+                 update_callback=None, auto_reconnect_callback=None):
         self._connection = None
         self._loggers = loggers
         self._log = loggers[__name__]
@@ -55,7 +54,7 @@ class MTProtoSender:
         self._auto_reconnect = auto_reconnect
         self._connect_timeout = connect_timeout
         self._auth_key_callback = auth_key_callback
-        self._updates_queue = updates_queue
+        self._update_callback = update_callback
         self._auto_reconnect_callback = auto_reconnect_callback
         self._connect_lock = asyncio.Lock()
         self._ping = None
@@ -301,7 +300,7 @@ class MTProtoSender:
             # notify whenever we change it. This is crucial when we
             # switch to different data centers.
             if self._auth_key_callback:
-                await self._auth_key_callback(self.auth_key)
+                self._auth_key_callback(self.auth_key)
 
             self._log.debug('auth_key generation success!')
             return True
@@ -383,10 +382,14 @@ class MTProtoSender:
             except BufferError as e:
                 # TODO there should probably only be one place to except all these errors
                 if isinstance(e, InvalidBufferError) and e.code == 404:
-                    self._log.info('Server does not know about the current auth key; the session may need to be recreated')
-                    last_error = AuthKeyNotFound()
+                    self._log.info('Broken authorization key; resetting')
+                    self.auth_key.key = None
+                    if self._auth_key_callback:
+                        self._auth_key_callback(None)
+
                     ok = False
                     break
+                
                 elif isinstance(e, InvalidBufferError) and e.code == 429:
                     if self.loop_halter_counter <= 4:
                         self._log.warning('Too many requests: HTTP code 429')
@@ -403,6 +406,7 @@ class MTProtoSender:
 
                         self._log.warning(f'Loop halted with {self.loop_halter_counter} requests')
                         self._start_reconnect(e)
+
                 else:
                     self._log.warning('Invalid buffer %s', e)
 
@@ -527,8 +531,6 @@ class MTProtoSender:
 
             try:
                 message = self._state.decrypt_message_data(body)
-                if message is None:
-                    continue  # this message is to be ignored
             except TypeNotFoundError as e:
                 # Received object which we don't know how to deserialize
                 self._log.info('Type %08x not found, remaining data %r',
@@ -542,14 +544,13 @@ class MTProtoSender:
                 continue
             except BufferError as e:
                 if isinstance(e, InvalidBufferError) and e.code == 404:
-                    #self._log.info('Server does not know about the current auth key; the session may need to be recreated')
-                    #await self._disconnect(error=AuthKeyNotFound())
                     self._log.info('Broken authorization key; resetting')
                     self.auth_key.key = None
                     if self._auth_key_callback:
                         self._auth_key_callback(None)
 
                     await self._disconnect(error=e)
+                
                 elif isinstance(e, InvalidBufferError) and e.code == 429:
                     if self.loop_halter_counter <= 4:
                         self._log.warning('Too many requests: HTTP code 429')
@@ -645,20 +646,12 @@ class MTProtoSender:
             # However receiving a File() with empty bytes is "common".
             # See #658, #759 and #958. They seem to happen in a container
             # which contain the real response right after.
-            #
-            # But, it might also happen that we get an *error* for no parent request.
-            # If that's the case attempting to read from body which is None would fail with:
-            # "BufferError: No more data left to read (need 4, got 0: b''); last read None".
-            # This seems to be particularly common for "RpcError(error_code=-500, error_message='No workers running')".
-            if rpc_result.error:
-                self._log.info('Received error without parent request: %s', rpc_result.error)
-            else:
-                try:
-                    with BinaryReader(rpc_result.body) as reader:
-                        if not isinstance(reader.tgread_object(), upload.File):
-                            raise ValueError('Not an upload.File')
-                except (TypeNotFoundError, ValueError):
-                    self._log.info('Received response without parent request: %s', rpc_result.body)
+            try:
+                with BinaryReader(rpc_result.body) as reader:
+                    if not isinstance(reader.tgread_object(), upload.File):
+                        raise ValueError('Not an upload.File')
+            except (TypeNotFoundError, ValueError):
+                self._log.info('Received response without parent request: %s', rpc_result.body)
             return
 
         if rpc_result.error:
@@ -677,7 +670,6 @@ class MTProtoSender:
                 if not state.future.cancelled():
                     state.future.set_exception(e)
             else:
-                self._store_own_updates(result)
                 if not state.future.cancelled():
                     state.future.set_result(result)
 
@@ -710,22 +702,8 @@ class MTProtoSender:
             return
 
         self._log.debug('Handling update %s', message.obj.__class__.__name__)
-        self._updates_queue.put_nowait(message.obj)
-
-    def _store_own_updates(self, obj, *, _update_ids=frozenset((
-        _tl.UpdateShortMessage.CONSTRUCTOR_ID,
-        _tl.UpdateShortChatMessage.CONSTRUCTOR_ID,
-        _tl.UpdateShort.CONSTRUCTOR_ID,
-        _tl.UpdatesCombined.CONSTRUCTOR_ID,
-        _tl.Updates.CONSTRUCTOR_ID,
-        _tl.UpdateShortSentMessage.CONSTRUCTOR_ID,
-    ))):
-        try:
-            if obj.CONSTRUCTOR_ID in _update_ids:
-                obj._self_outgoing = True  # flag to only process, but not dispatch these
-                self._updates_queue.put_nowait(obj)
-        except AttributeError:
-            pass
+        if self._update_callback:
+            self._update_callback(message.obj)
 
     async def _handle_pong(self, message):
         """
