@@ -1,4 +1,4 @@
-#lona github
+
 import asyncio
 import collections
 import struct
@@ -12,7 +12,7 @@ from .mtprotostate import MTProtoState
 from ..tl.tlobject import TLRequest
 from .. import helpers, utils
 from ..errors import (
-    BadMessageError, InvalidBufferError, AuthKeyNotFound, SecurityError,
+    BadMessageError, InvalidBufferError, SecurityError,
     TypeNotFoundError, rpc_message_to_error
 )
 from ..extensions import BinaryReader
@@ -24,7 +24,6 @@ from ..tl.types import (
     MsgNewDetailedInfo, NewSessionCreated, MsgDetailedInfo, MsgsStateReq,
     MsgsStateInfo, MsgsAllInfo, MsgResendReq, upload, DestroySessionOk, DestroySessionNone,
 )
-from ..tl import types as _tl
 from ..crypto import AuthKey
 from ..helpers import retry_range
 
