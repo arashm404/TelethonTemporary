@@ -115,7 +115,6 @@ class MTProtoSender:
 
         self.send_loop_halter = set()
 
-        self.loop_halter_counter = 0
 
     # Public API
 
@@ -391,21 +390,14 @@ class MTProtoSender:
                     break
                 
                 elif isinstance(e, InvalidBufferError) and e.code == 429:
-                    if self.loop_halter_counter <= 4:
-                        self._log.warning('Too many requests: HTTP code 429')
-                        if len(self.send_loop_halter) > 0:
-                            continue
-                        loop = asyncio.get_event_loop()
-                        halt_task = loop.create_task(self._halt_send_loop(loop))
-                        self.send_loop_halter.add(halt_task)
-                        halt_task.add_done_callback(self.send_loop_halter.discard)
-                        self.loop_halter_counter += 1
+                    self._log.warning('Too many requests: HTTP code 429')
+                    if len(self.send_loop_halter) > 0:
                         continue
-
-                    else:
-
-                        self._log.warning(f'Loop halted with {self.loop_halter_counter} requests')
-                        self._start_reconnect(e)
+                    loop = asyncio.get_event_loop()
+                    halt_task = loop.create_task(self._halt_send_loop(loop))
+                    self.send_loop_halter.add(halt_task)
+                    halt_task.add_done_callback(self.send_loop_halter.discard)
+                    continue
 
                 else:
                     self._log.warning('Invalid buffer %s', e)
@@ -552,21 +544,15 @@ class MTProtoSender:
                     await self._disconnect(error=e)
                 
                 elif isinstance(e, InvalidBufferError) and e.code == 429:
-                    if self.loop_halter_counter <= 4:
-                        self._log.warning('Too many requests: HTTP code 429')
-                        if len(self.send_loop_halter) > 0:
-                            continue
-                        loop = asyncio.get_event_loop()
-                        halt_task = loop.create_task(self._halt_send_loop(loop))
-                        self.send_loop_halter.add(halt_task)
-                        halt_task.add_done_callback(self.send_loop_halter.discard)
-                        self.loop_halter_counter += 1
+                    self._log.warning('Too many requests: HTTP code 429')
+                    if len(self.send_loop_halter) > 0:
                         continue
+                    loop = asyncio.get_event_loop()
+                    halt_task = loop.create_task(self._halt_send_loop(loop))
+                    self.send_loop_halter.add(halt_task)
+                    halt_task.add_done_callback(self.send_loop_halter.discard)
+                    continue
 
-                    else:
-
-                        self._log.warning(f'Loop halted with {self.loop_halter_counter} requests')
-                        self._start_reconnect(e)
 
                 else:
                     self._log.warning('Invalid buffer %s', e)
