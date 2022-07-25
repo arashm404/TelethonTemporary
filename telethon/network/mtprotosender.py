@@ -391,8 +391,8 @@ class MTProtoSender:
                 
                 elif isinstance(e, InvalidBufferError) and e.code == 429:
                     self._log.warning('Too many requests: HTTP code 429')
-                    if len(self.send_loop_halter) > 0:
-                        continue
+                    if len(self.send_loop_halter) > 3:
+                        break
                     loop = asyncio.get_event_loop()
                     halt_task = loop.create_task(self._halt_send_loop(loop))
                     self.send_loop_halter.add(halt_task)
@@ -545,8 +545,8 @@ class MTProtoSender:
                 
                 elif isinstance(e, InvalidBufferError) and e.code == 429:
                     self._log.warning('Too many requests: HTTP code 429')
-                    if len(self.send_loop_halter) > 0:
-                        continue
+                    if len(self.send_loop_halter) > 3:
+                        break
                     loop = asyncio.get_event_loop()
                     halt_task = loop.create_task(self._halt_send_loop(loop))
                     self.send_loop_halter.add(halt_task)
