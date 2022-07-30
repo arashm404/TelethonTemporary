@@ -12,7 +12,7 @@ from ..tl.tlobject import TLRequest
 from .. import helpers, utils
 from ..errors import (
     BadMessageError, InvalidBufferError, SecurityError,
-    TypeNotFoundError, rpc_message_to_error
+    TypeNotFoundError, rpc_message_to_error , TooMuchHttpRequest
 )
 from ..extensions import BinaryReader
 from ..tl.core import RpcResult, MessageContainer, GzipPacked
@@ -390,14 +390,8 @@ class MTProtoSender:
                     break
                 
                 elif isinstance(e, InvalidBufferError) and e.code == 429:
-                    self._log.warning('Too many requests: HTTP code 429')
-                    if len(self.send_loop_halter) > 3:
-                        break
-                    loop = asyncio.get_event_loop()
-                    halt_task = loop.create_task(self._halt_send_loop(loop))
-                    self.send_loop_halter.add(halt_task)
-                    halt_task.add_done_callback(self.send_loop_halter.discard)
-                    continue
+                    await self._disconnect(error=e)
+                    raise TooMuchHttpRequest(message='Too Much Http Request',request=self._connection)
 
                 else:
                     self._log.warning('Invalid buffer %s', e)
@@ -544,14 +538,8 @@ class MTProtoSender:
                     await self._disconnect(error=e)
                 
                 elif isinstance(e, InvalidBufferError) and e.code == 429:
-                    self._log.warning('Too many requests: HTTP code 429')
-                    if len(self.send_loop_halter) > 3:
-                        break
-                    loop = asyncio.get_event_loop()
-                    halt_task = loop.create_task(self._halt_send_loop(loop))
-                    self.send_loop_halter.add(halt_task)
-                    halt_task.add_done_callback(self.send_loop_halter.discard)
-                    continue
+                    await self._disconnect(error=e)
+                    raise TooMuchHttpRequest(message='Too Much Http Request',request=self._connection)
 
 
                 else:
@@ -568,14 +556,6 @@ class MTProtoSender:
             except Exception:
                 self._log.exception('Unhandled error while processing msgs')
 
-    async def _halt_send_loop(self, loop: asyncio.AbstractEventLoop):
-        self._log.warning('Cancelling send loop due to HTTP code 429')
-        await helpers._cancel(self._send_loop_handle)
-
-        await asyncio.sleep(random.uniform(3,5))
-
-        self._log.warning('Restarting send loop after HTTP code 429')
-        self._send_loop_handle = loop.create_task(self._send_loop())
 
     # Response Handlers
 
