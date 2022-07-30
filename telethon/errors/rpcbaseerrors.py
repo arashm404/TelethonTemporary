@@ -71,6 +71,15 @@ class AuthKeyError(RPCError):
     code = 406
     message = 'AUTH_KEY'
 
+class TooMuchHttpRequest(RPCError):
+    """
+    Errors related to invald http request
+    Maybe too much requests we receive 429
+    """
+    code = 819
+    message = 'HTTP_429_ERR'
+
+
 
 class FloodError(RPCError):
     """
