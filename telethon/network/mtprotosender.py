@@ -390,6 +390,7 @@ class MTProtoSender:
                     break
                 
                 elif isinstance(e, InvalidBufferError) and e.code == 429:
+                    self._log.info('Disconnect And Raise Error Cause 429 HTTP (V2)')
                     await self._disconnect(error=e)
                     raise ConnectionError(message='Too Much Http Request')
 
@@ -538,6 +539,7 @@ class MTProtoSender:
                     await self._disconnect(error=e)
                 
                 elif isinstance(e, InvalidBufferError) and e.code == 429:
+                    self._log.info('Disconnect And Raise Error Cause 429 HTTP (V2)')
                     await self._disconnect(error=e)
                     raise ConnectionError(message='Too Much Http Request')
 
