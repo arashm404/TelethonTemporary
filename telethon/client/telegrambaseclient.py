@@ -488,7 +488,7 @@ class TelegramBaseClient(abc.ABC):
 
     # region Connecting
 
-    async def connect(self: 'TelegramClient') -> None:
+    async def connect(self: 'TelegramClient' , layer : int = None) -> None:
         """
         Connects to Telegram.
 
@@ -527,7 +527,7 @@ class TelegramBaseClient(abc.ABC):
         self._init_request.query = functions.help.GetConfigRequest()
 
         await self._sender.send(functions.InvokeWithLayerRequest(
-            LAYER, self._init_request
+            layer or LAYER, self._init_request
         ))
 
         self._updates_handle = self.loop.create_task(self._update_loop())
