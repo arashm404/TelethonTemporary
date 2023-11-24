@@ -1,6 +1,6 @@
 import datetime
 
-from .. import TLObject
+from .. import TLObject , types
 from ..functions.messages import SaveDraftRequest
 from ..types import DraftMessage
 from ...errors import RPCError
