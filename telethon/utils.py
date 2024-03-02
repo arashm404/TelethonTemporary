@@ -4,7 +4,6 @@ to convert between an entity like a User, Chat, etc. into its Input version)
 """
 import base64
 import binascii
-import imghdr
 import inspect
 import io
 import itertools
@@ -54,20 +53,14 @@ mimetypes.add_type('audio/flac', '.flac')
 mimetypes.add_type('application/x-tgsticker', '.tgs')
 
 USERNAME_RE = re.compile(
-    r'@|(?:https?://)?(?:www\.)?(?:telegram\.(?:me|dog)|t\.me)/(@|joinchat/)?'
+    r'@|(?:https?://)?(?:www\.)?(?:telegram\.(?:me|dog)|t\.me)/(@|\+|joinchat/)?'
 )
 TG_JOIN_RE = re.compile(
     r'tg://(join)\?invite='
 )
 
-# The only shorter-than-five-characters usernames are those used for some
-# special, very well known bots. This list may be incomplete though:
-#    "[...] @gif, @vid, @pic, @bing, @wiki, @imdb and @bold [...]"
-#
-# See https://telegram.org/blog/inline-bots#how-does-it-work
 VALID_USERNAME_RE = re.compile(
-    r'^([a-z](?:(?!__)\w){3,30}[a-z\d]'
-    r'|gif|vid|pic|bing|wiki|imdb|bold|vote|like|coub)$',
+    r'^[a-z](?:(?!__)\w){1,30}[a-z\d]$',
     re.IGNORECASE
 )
 
@@ -429,7 +422,8 @@ def get_input_geo(geo):
 def get_input_media(
         media, *,
         is_photo=False, attributes=None, force_document=False,
-        voice_note=False, video_note=False, supports_streaming=False
+        voice_note=False, video_note=False, supports_streaming=False,
+        ttl=None
 ):
     """
     Similar to :meth:`get_input_peer`, but for media.
@@ -442,37 +436,39 @@ def get_input_media(
         if media.SUBCLASS_OF_ID == 0xfaf846f4:  # crc32(b'InputMedia')
             return media
         elif media.SUBCLASS_OF_ID == 0x846363e0:  # crc32(b'InputPhoto')
-            return types.InputMediaPhoto(media)
+            return types.InputMediaPhoto(media, ttl_seconds=ttl)
         elif media.SUBCLASS_OF_ID == 0xf33fdb68:  # crc32(b'InputDocument')
-            return types.InputMediaDocument(media)
+            return types.InputMediaDocument(media, ttl_seconds=ttl)
     except AttributeError:
         _raise_cast_fail(media, 'InputMedia')
 
     if isinstance(media, types.MessageMediaPhoto):
         return types.InputMediaPhoto(
             id=get_input_photo(media.photo),
-            ttl_seconds=media.ttl_seconds
+            ttl_seconds=ttl or media.ttl_seconds
         )
 
     if isinstance(media, (types.Photo, types.photos.Photo, types.PhotoEmpty)):
         return types.InputMediaPhoto(
-            id=get_input_photo(media)
+            id=get_input_photo(media),
+            ttl_seconds=ttl
         )
 
     if isinstance(media, types.MessageMediaDocument):
         return types.InputMediaDocument(
             id=get_input_document(media.document),
-            ttl_seconds=media.ttl_seconds
+            ttl_seconds=ttl or media.ttl_seconds
         )
 
     if isinstance(media, (types.Document, types.DocumentEmpty)):
         return types.InputMediaDocument(
-            id=get_input_document(media)
+            id=get_input_document(media),
+            ttl_seconds=ttl
         )
 
     if isinstance(media, (types.InputFile, types.InputFileBig)):
         if is_photo:
-            return types.InputMediaUploadedPhoto(file=media)
+            return types.InputMediaUploadedPhoto(file=media, ttl_seconds=ttl)
         else:
             attrs, mime = get_attributes(
                 media,
@@ -483,7 +479,8 @@ def get_input_media(
                 supports_streaming=supports_streaming
             )
             return types.InputMediaUploadedDocument(
-                file=media, mime_type=mime, attributes=attrs, force_file=force_document)
+                file=media, mime_type=mime, attributes=attrs, force_file=force_document,
+                ttl_seconds=ttl)
 
     if isinstance(media, types.MessageMediaGame):
         return types.InputMediaGame(id=types.InputGameID(
@@ -522,7 +519,7 @@ def get_input_media(
         return types.InputMediaEmpty()
 
     if isinstance(media, types.Message):
-        return get_input_media(media.media, is_photo=is_photo)
+        return get_input_media(media.media, is_photo=is_photo, ttl=ttl)
 
     if isinstance(media, types.MessageMediaPoll):
         if media.poll.quiz:
@@ -579,11 +576,14 @@ def _get_entity_pair(entity_id, entities, cache,
     """
     Returns ``(entity, input_entity)`` for the given entity ID.
     """
+    if not entity_id:
+        return None, None
+
     entity = entities.get(entity_id)
     try:
-        input_entity = cache[entity_id]
-    except KeyError:
-        # KeyError is unlikely, so another TypeError won't hurt
+        input_entity = cache.get(resolve_id(entity_id)[0])._as_input_peer()
+    except AttributeError:
+        # AttributeError is unlikely, so another TypeError won't hurt
         try:
             input_entity = get_input_peer(entity)
         except TypeError:
@@ -756,7 +756,10 @@ def sanitize_parse_mode(mode):
     if not mode:
         return None
 
-    if callable(mode):
+    if (all(hasattr(mode, x) for x in ('parse', 'unparse'))
+          and all(callable(x) for x in (mode.parse, mode.unparse))):
+        return mode
+    elif callable(mode):
         class CustomMode:
             @staticmethod
             def unparse(text, entities):
@@ -764,9 +767,6 @@ def sanitize_parse_mode(mode):
 
         CustomMode.parse = mode
         return CustomMode
-    elif (all(hasattr(mode, x) for x in ('parse', 'unparse'))
-          and all(callable(x) for x in (mode.parse, mode.unparse))):
-        return mode
     elif isinstance(mode, str):
         try:
             return {
@@ -834,12 +834,6 @@ def _get_extension(file):
         return os.path.splitext(file)[-1]
     elif isinstance(file, pathlib.Path):
         return file.suffix
-    elif isinstance(file, bytes):
-        kind = imghdr.what(io.BytesIO(file))
-        return ('.' + kind) if kind else ''
-    elif isinstance(file, io.IOBase) and not isinstance(file, io.TextIOBase) and file.seekable():
-        kind = imghdr.what(file)
-        return ('.' + kind) if kind is not None else ''
     elif getattr(file, 'name', None):
         # Note: ``file.name`` works for :tl:`InputFile` and some `IOBase`
         return _get_extension(file.name)
@@ -1025,13 +1019,13 @@ def get_peer_id(peer, add_mark=True):
         return peer.user_id
     elif isinstance(peer, types.PeerChat):
         # Check in case the user mixed things up to avoid blowing up
-        if not (0 < peer.chat_id <= 0x7fffffff):
+        if not (0 < peer.chat_id <= 9999999999):
             peer.chat_id = resolve_id(peer.chat_id)[0]
 
         return -peer.chat_id if add_mark else peer.chat_id
     else:  # if isinstance(peer, types.PeerChannel):
         # Check in case the user mixed things up to avoid blowing up
-        if not (0 < peer.channel_id <= 0x7fffffff):
+        if not (0 < peer.channel_id <= 9999999999):
             peer.channel_id = resolve_id(peer.channel_id)[0]
 
         if not add_mark:
@@ -1337,10 +1331,7 @@ def get_appropriated_part_size(file_size):
         return 128
     if file_size <= 786432000:  # 750MB
         return 256
-    if file_size <= 2097152000:  # 2000MB
-        return 512
-
-    raise ValueError('File size too large')
+    return 512
 
 
 def encode_waveform(waveform):
