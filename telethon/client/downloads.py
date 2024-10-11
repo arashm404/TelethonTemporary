@@ -27,21 +27,31 @@ MAX_CHUNK_SIZE = 512 * 1024
 # 2021-01-15, users reported that `errors.TimeoutError` can occur while downloading files.
 TIMED_OUT_SLEEP = 1
 
+
+class _CdnRedirect(Exception):
+    def __init__(self, cdn_redirect=None):
+        self.cdn_redirect = cdn_redirect
+      
+  
 class _DirectDownloadIter(RequestIter):
     async def _init(
-            self, file, dc_id, offset, stride, chunk_size, request_size, file_size, msg_data
-    ):
+            self, file, dc_id, offset, stride, chunk_size, request_size, file_size, msg_data, cdn_redirect=None):
         self.request = functions.upload.GetFileRequest(
-            file, offset=offset, limit=request_size)
-
+            file, offset=offset, limit=request_size) 
+        self._client = self.client
+        self._cdn_redirect = cdn_redirect
+        if cdn_redirect is not None:
+          self.request = functions.upload.GetCdnFileRequest(cdn_redirect.file_token, offset=offset, limit=request_size)
+          self._client = await self.client._get_cdn_client(cdn_redirect)
+        
         self.total = file_size
         self._stride = stride
         self._chunk_size = chunk_size
         self._last_part = None
         self._msg_data = msg_data
         self._timed_out = False
-
-        self._exported = dc_id and self.client.session.dc_id != dc_id
+        
+        self._exported = dc_id and self._client.session.dc_id != dc_id
         if not self._exported:
             # The used sender will also change if ``FileMigrateError`` occurs
             self._sender = self.client._sender
@@ -73,14 +83,20 @@ class _DirectDownloadIter(RequestIter):
 
     async def _request(self):
         try:
-            result = await self.client._call(self._sender, self.request)
+            result = await self._client._call(self._sender, self.request)
             self._timed_out = False
             if isinstance(result, types.upload.FileCdnRedirect):
-                raise NotImplementedError  # TODO Implement
+                if self.client._mb_entity_cache.self_bot:
+                    raise ValueError('FileCdnRedirect but the GetCdnFileRequest API access for bot users is restricted. Try to change api_id to avoid FileCdnRedirect')
+                raise _CdnRedirect(result)
+            if isinstance(result, types.upload.CdnFileReuploadNeeded):
+                await self.client._call(self.client._sender, functions.upload.ReuploadCdnFileRequest(file_token=self._cdn_redirect.file_token, request_token=result.request_token))
+                result = await self._client._call(self._sender, self.request)
+                return result.bytes
             else:
                 return result.bytes
 
-        except errors.TimeoutError as e:
+        except errors.TimedOutError as e:
             if self._timed_out:
                 self.client._log[__name__].warning('Got two timeouts in a row while downloading file')
                 raise
@@ -96,7 +112,7 @@ class _DirectDownloadIter(RequestIter):
             self._exported = True
             return await self._request()
 
-        except errors.FilerefUpgradeNeededError as e:
+        except (errors.FilerefUpgradeNeededError, errors.FileReferenceExpiredError) as e:
             # Only implemented for documents which are the ones that may take that long to download
             if not self._msg_data \
                     or not isinstance(self.request.location, types.InputDocumentFileLocation) \
@@ -223,7 +239,8 @@ class DownloadMethods:
                 The output file path, directory, or stream-like object.
                 If the path exists and is a file, it will be overwritten.
                 If file is the type `bytes`, it will be downloaded in-memory
-                as a bytestring (e.g. ``file=bytes``).
+                and returned as a bytestring (i.e. ``file=bytes``, without
+                parentheses or quotes).
 
             download_big (`bool`, optional):
                 Whether to use the big version of the available photos.
@@ -272,7 +289,9 @@ class DownloadMethods:
         if isinstance(photo, (types.UserProfilePhoto, types.ChatPhoto)):
             dc_id = photo.dc_id
             loc = types.InputPeerPhotoFileLocation(
-                peer=await self.get_input_entity(entity),
+                # min users can be used to download profile photos
+                # self.get_input_entity would otherwise not accept those
+                peer=utils.get_input_peer(entity, check_hash=False),
                 photo_id=photo.photo_id,
                 big=download_big
             )
@@ -331,7 +350,8 @@ class DownloadMethods:
                 The output file path, directory, or stream-like object.
                 If the path exists and is a file, it will be overwritten.
                 If file is the type `bytes`, it will be downloaded in-memory
-                as a bytestring (e.g. ``file=bytes``).
+                and returned as a bytestring (i.e. ``file=bytes``, without
+                parentheses or quotes).
 
             progress_callback (`callable`, optional):
                 A callback function accepting two parameters:
@@ -374,6 +394,9 @@ class DownloadMethods:
                 path = await message.download_media()
                 await message.download_media(filename)
 
+                # Downloading to memory
+                blob = await client.download_media(message, bytes)
+
                 # Printing download progress
                 def callback(current, total):
                     print('Downloaded', current, 'out of', total,
@@ -402,7 +425,7 @@ class DownloadMethods:
             if isinstance(message.action,
                           types.MessageActionChatEditPhoto):
                 media = media.photo
-       
+
         if isinstance(media, types.MessageMediaWebPage):
             if isinstance(media.webpage, types.WebPage):
                 media = media.webpage.document or media.webpage.photo
@@ -509,7 +532,9 @@ class DownloadMethods:
             dc_id: int = None,
             key: bytes = None,
             iv: bytes = None,
-            msg_data: tuple = None) -> typing.Optional[bytes]:
+            msg_data: tuple = None,
+            cdn_redirect: types.upload.FileCdnRedirect = None
+    ) -> typing.Optional[bytes]:
         if not part_size_kb:
             if not file_size:
                 part_size_kb = 64  # Reasonable default
@@ -536,7 +561,7 @@ class DownloadMethods:
 
         try:
             async for chunk in self._iter_download(
-                    input_location, request_size=part_size, dc_id=dc_id, msg_data=msg_data):
+                    input_location, request_size=part_size, dc_id=dc_id, msg_data=msg_data, cdn_redirect=cdn_redirect):
                 if iv and key:
                     chunk = AES.decrypt_ige(chunk, key, iv)
                 r = f.write(chunk)
@@ -554,6 +579,20 @@ class DownloadMethods:
 
             if in_memory:
                 return f.getvalue()
+        except _CdnRedirect as e:
+          self._log[__name__].info('FileCdnRedirect to CDN data center %s', e.cdn_redirect.dc_id)
+          return await self._download_file(
+              input_location=input_location,
+              file=file,
+              part_size_kb=part_size_kb,
+              file_size=file_size,
+              progress_callback=progress_callback,
+              dc_id=e.cdn_redirect.dc_id,
+              key=e.cdn_redirect.encryption_key,
+              iv=e.cdn_redirect.encryption_iv,
+              msg_data=msg_data,
+              cdn_redirect=e.cdn_redirect
+          )
         finally:
             if isinstance(file, str) or in_memory:
                 f.close()
@@ -675,7 +714,8 @@ class DownloadMethods:
             request_size: int = MAX_CHUNK_SIZE,
             file_size: int = None,
             dc_id: int = None,
-            msg_data: tuple = None
+            msg_data: tuple = None,
+            cdn_redirect: types.upload.FileCdnRedirect = None
     ):
         info = utils._get_file_info(file)
         if info.dc_id is not None:
@@ -726,6 +766,7 @@ class DownloadMethods:
             request_size=request_size,
             file_size=file_size,
             msg_data=msg_data,
+            cdn_redirect=cdn_redirect
         )
 
     # endregion
@@ -734,6 +775,9 @@ class DownloadMethods:
 
     @staticmethod
     def _get_thumb(thumbs, thumb):
+        if not thumbs:
+            return None
+
         # Seems Telegram has changed the order and put `PhotoStrippedSize`
         # last while this is the smallest (layer 116). Ensure we have the
         # sizes sorted correctly with a custom function.
@@ -876,6 +920,9 @@ class DownloadMethods:
         else:
             file = self._get_proper_filename(file, 'photo', '.jpg', date=date)
             size = self._get_thumb(document.thumbs, thumb)
+            if not size or isinstance(size, types.PhotoSizeEmpty):
+                return
+
             if isinstance(size, (types.PhotoCachedSize, types.PhotoStrippedSize)):
                 return self._download_cached_photo_size(size, file)
 
@@ -916,22 +963,19 @@ class DownloadMethods:
             'END:VCARD\n'
         ).format(f=first_name, l=last_name, p=phone_number).encode('utf-8')
 
+        file = cls._get_proper_filename(
+            file, 'contact', '.vcard',
+            possible_names=[first_name, phone_number, last_name]
+        )
         if file is bytes:
             return result
-        elif isinstance(file, str):
-            file = cls._get_proper_filename(
-                file, 'contact', '.vcard',
-                possible_names=[first_name, phone_number, last_name]
-            )
-            f = open(file, 'wb')
-        else:
-            f = file
+        f = file if hasattr(file, 'write') else open(file, 'wb')
 
         try:
             f.write(result)
         finally:
             # Only close the stream if we opened it
-            if isinstance(file, str):
+            if f != file:
                 f.close()
 
         return file
@@ -948,21 +992,20 @@ class DownloadMethods:
             )
 
         # TODO Better way to get opened handles of files and auto-close
-        in_memory = file is bytes
-        if in_memory:
+        kind, possible_names = self._get_kind_and_names(web.attributes)
+        file = self._get_proper_filename(
+            file, kind, utils.get_extension(web),
+            possible_names=possible_names
+        )
+        if file is bytes:
             f = io.BytesIO()
-        elif isinstance(file, str):
-            kind, possible_names = cls._get_kind_and_names(web.attributes)
-            file = cls._get_proper_filename(
-                file, kind, utils.get_extension(web),
-                possible_names=possible_names
-            )
-            f = open(file, 'wb')
-        else:
+        elif hasattr(file, 'write'):
             f = file
+        else:
+            f = open(file, 'wb')
 
         try:
-            with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession() as session:
                 # TODO Use progress_callback; get content length from response
                 # https://github.com/telegramdesktop/tdesktop/blob/c7e773dd9aeba94e2be48c032edc9a78bb50234e/Telegram/SourceFiles/ui/images.cpp#L1318-L1319
                 async with session.get(web.url) as response:
@@ -972,10 +1015,10 @@ class DownloadMethods:
                             break
                         f.write(chunk)
         finally:
-            if isinstance(file, str) or file is bytes:
+            if f != file:
                 f.close()
 
-        return f.getvalue() if in_memory else file
+        return f.getvalue() if file is bytes else file
 
     @staticmethod
     def _get_proper_filename(file, kind, extension,
