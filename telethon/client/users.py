@@ -30,6 +30,10 @@ class UserMethods:
         return await self._call(self._sender, request, ordered=ordered)
 
     async def _call(self: 'TelegramClient', sender, request, ordered=False, flood_sleep_threshold=None):
+        if self._loop is not None and self._loop != helpers.get_running_loop():
+            raise RuntimeError('The asyncio event loop must not change after connection (see the FAQ for details)')
+        # if the loop is None it will fail with a connection error later on
+
         if flood_sleep_threshold is None:
             flood_sleep_threshold = self.flood_sleep_threshold
         requests = (request if utils.is_list_like(request) else (request,))
@@ -51,6 +55,9 @@ class UserMethods:
                 else:
                     raise errors.FloodWaitError(request=r, capture=diff)
 
+            if self._no_updates:
+                r = functions.InvokeWithoutUpdatesRequest(r)
+
         request_index = 0
         last_error = None
         self._last_request = time.time()
@@ -69,7 +76,6 @@ class UserMethods:
                             results.append(None)
                             continue
                         self.session.process_entities(result)
-                        self._entity_cache.add(result)
                         exceptions.append(None)
                         results.append(result)
                         request_index += 1
@@ -80,7 +86,6 @@ class UserMethods:
                 else:
                     result = await future
                     self.session.process_entities(result)
-                    self._entity_cache.add(result)
                     return result
             except (errors.ServerError, errors.RpcCallFailError,
                     errors.RpcMcgetFailError, errors.InterdcCallErrorError,
@@ -92,7 +97,8 @@ class UserMethods:
                     e.__class__.__name__, e)
 
                 await asyncio.sleep(2)
-            except (errors.FloodWaitError, errors.SlowModeWaitError, errors.FloodTestPhoneWaitError) as e:
+            except (errors.FloodWaitError, errors.FloodPremiumWaitError,
+                    errors.SlowModeWaitError, errors.FloodTestPhoneWaitError) as e:
                 last_error = e
                 if utils.is_list_like(request):
                     request = request[request_index]
@@ -152,20 +158,17 @@ class UserMethods:
                 me = await client.get_me()
                 print(me.username)
         """
-        if input_peer and self._self_input_peer:
-            return self._self_input_peer
+        if input_peer and self._mb_entity_cache.self_id:
+            return self._mb_entity_cache.get(self._mb_entity_cache.self_id)._as_input_peer()
 
         try:
             me = (await self(
                 functions.users.GetUsersRequest([types.InputUserSelf()])))[0]
 
-            self._bot = me.bot
-            if not self._self_input_peer:
-                self._self_input_peer = utils.get_input_peer(
-                    me, allow_self=False
-                )
+            if not self._mb_entity_cache.self_id:
+                self._mb_entity_cache.set_self_user(me.id, me.bot, me.access_hash)
 
-            return self._self_input_peer if input_peer else me
+            return utils.get_input_peer(me, allow_self=False) if input_peer else me
         except errors.UnauthorizedError:
             return None
 
@@ -177,7 +180,7 @@ class UserMethods:
         This property is used in every update, and some like `updateLoginToken`
         occur prior to login, so it gracefully handles when no ID is known yet.
         """
-        return self._self_input_peer.user_id if self._self_input_peer else None
+        return self._mb_entity_cache.self_id
 
     async def is_bot(self: 'TelegramClient') -> bool:
         """
@@ -191,10 +194,10 @@ class UserMethods:
                 else:
                     print('Hello')
         """
-        if self._bot is None:
-            self._bot = (await self.get_me()).bot
+        if self._mb_entity_cache.self_bot is None:
+            await self.get_me(input_peer=True)
 
-        return self._bot
+        return self._mb_entity_cache.self_bot
 
     async def is_user_authorized(self: 'TelegramClient') -> bool:
         """
@@ -220,7 +223,7 @@ class UserMethods:
 
     async def get_entity(
             self: 'TelegramClient',
-            entity: 'hints.EntitiesLike') -> 'hints.Entity':
+            entity: 'hints.EntitiesLike') -> typing.Union['hints.Entity', typing.List['hints.Entity']]:
         """
         Turns the given entity into a valid Telegram :tl:`User`, :tl:`Chat`
         or :tl:`Channel`. You can also pass a list or iterable of entities,
@@ -319,7 +322,9 @@ class UserMethods:
 
         # Merge users, chats and channels into a single dictionary
         id_entity = {
-            utils.get_peer_id(x): x
+            # `get_input_entity` might've guessed the type from a non-marked ID,
+            # so the only way to match that with the input is by not using marks here.
+            utils.get_peer_id(x, add_mark=False): x
             for x in itertools.chain(users, chats, channels)
         }
 
@@ -332,7 +337,7 @@ class UserMethods:
             if isinstance(x, str):
                 result.append(await self._get_entity_from_string(x))
             elif not isinstance(x, types.InputPeerSelf):
-                result.append(id_entity[utils.get_peer_id(x)])
+                result.append(id_entity[utils.get_peer_id(x, add_mark=False)])
             else:
                 result.append(next(
                     u for u in id_entity.values()
@@ -415,8 +420,8 @@ class UserMethods:
         try:
             # 0x2d45687 == crc32(b'Peer')
             if isinstance(peer, int) or peer.SUBCLASS_OF_ID == 0x2d45687:
-                return self._entity_cache[peer]
-        except (AttributeError, KeyError):
+                return self._mb_entity_cache.get(utils.get_peer_id(peer, add_mark=False))._as_input_peer()
+        except AttributeError:
             pass
 
         # Then come known strings that take precedence
@@ -463,7 +468,7 @@ class UserMethods:
 
         raise ValueError(
             'Could not find the input entity for {} ({}). Please read https://'
-            'docs.telethon.dev/en/latest/concepts/entities.html to'
+            'docs.telethon.dev/en/stable/concepts/entities.html to'
             ' find out more details.'
             .format(peer, type(peer).__name__)
         )
