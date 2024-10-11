@@ -70,6 +70,9 @@ class Message(ChatGetter, SenderGetter, TLObject):
 
         invert_media (`bool`):
             Whether the media in this message should be inverted.
+            
+        offline (`bool`):
+            Whether the message was sent by an implicit action, for example, as an away or a greeting business message, or as a scheduled message.
 
         id (`int`):
             The ID of this message. This field is *always* present.
@@ -174,7 +177,7 @@ class Message(ChatGetter, SenderGetter, TLObject):
             id: int, peer_id: types.TypePeer,
             date: Optional[datetime]=None, message: Optional[str]=None,
             # Copied from Message.__init__ signature
-            out: Optional[bool]=None, mentioned: Optional[bool]=None, media_unread: Optional[bool]=None, silent: Optional[bool]=None, post: Optional[bool]=None, from_scheduled: Optional[bool]=None, legacy: Optional[bool]=None, edit_hide: Optional[bool]=None, pinned: Optional[bool]=None, noforwards: Optional[bool]=None, invert_media: Optional[bool]=None, from_id: Optional[types.TypePeer]=None, from_boosts_applied: Optional[int]=None, saved_peer_id: Optional[types.TypePeer]=None, fwd_from: Optional[types.TypeMessageFwdHeader]=None, via_bot_id: Optional[int]=None, reply_to: Optional[types.TypeMessageReplyHeader]=None, media: Optional[types.TypeMessageMedia]=None, reply_markup: Optional[types.TypeReplyMarkup]=None, entities: Optional[List[types.TypeMessageEntity]]=None, views: Optional[int]=None, forwards: Optional[int]=None, replies: Optional[types.TypeMessageReplies]=None, edit_date: Optional[datetime]=None, post_author: Optional[str]=None, grouped_id: Optional[int]=None, reactions: Optional[types.TypeMessageReactions]=None, restriction_reason: Optional[List[types.TypeRestrictionReason]]=None, ttl_period: Optional[int]=None,
+            out: Optional[bool]=None, mentioned: Optional[bool]=None, media_unread: Optional[bool]=None, silent: Optional[bool]=None, post: Optional[bool]=None, from_scheduled: Optional[bool]=None, legacy: Optional[bool]=None, edit_hide: Optional[bool]=None, pinned: Optional[bool]=None, noforwards: Optional[bool]=None, invert_media: Optional[bool]=None, offline: Optional[bool]=None, from_id: Optional[types.TypePeer]=None, from_boosts_applied: Optional[int]=None, saved_peer_id: Optional[types.TypePeer]=None, fwd_from: Optional[types.TypeMessageFwdHeader]=None, via_bot_id: Optional[int]=None, via_business_bot_id: Optional[int]=None, reply_to: Optional[types.TypeMessageReplyHeader]=None, media: Optional[types.TypeMessageMedia]=None, reply_markup: Optional[types.TypeReplyMarkup]=None, entities: Optional[List[types.TypeMessageEntity]]=None, views: Optional[int]=None, forwards: Optional[int]=None, replies: Optional[types.TypeMessageReplies]=None, edit_date: Optional[datetime]=None, post_author: Optional[str]=None, grouped_id: Optional[int]=None, reactions: Optional[types.TypeMessageReactions]=None, restriction_reason: Optional[List[types.TypeRestrictionReason]]=None, ttl_period: Optional[int]=None, quick_reply_shortcut_id: Optional[int]=None, effect: Optional[int]=None, factcheck: Optional[types.TypeFactCheck]=None,
             # Copied from MessageService.__init__ signature
             action: Optional[types.TypeMessageAction]=None
     ):
@@ -194,11 +197,13 @@ class Message(ChatGetter, SenderGetter, TLObject):
         self.pinned = pinned
         self.noforwards = noforwards
         self.invert_media = invert_media
+        self.offline = offline
         self.from_id = from_id
         self.from_boosts_applied = from_boosts_applied
         self.saved_peer_id = saved_peer_id
         self.fwd_from = fwd_from
         self.via_bot_id = via_bot_id
+        self.via_business_bot_id = via_business_bot_id
         self.reply_to = reply_to
         self.media = None if isinstance(media, types.MessageMediaEmpty) else media
         self.reply_markup = reply_markup
@@ -212,6 +217,9 @@ class Message(ChatGetter, SenderGetter, TLObject):
         self.reactions = reactions
         self.restriction_reason = restriction_reason
         self.ttl_period = ttl_period
+        self.quick_reply_shortcut_id = quick_reply_shortcut_id
+        self.effect = effect
+        self.factcheck = factcheck
         # Copied from MessageService.__init__ body
         self.action = action
 
@@ -261,7 +269,7 @@ class Message(ChatGetter, SenderGetter, TLObject):
         if self.peer_id == types.PeerUser(client._self_id) and not self.fwd_from:
             self.out = True
 
-        cache = client._entity_cache
+        cache = client._mb_entity_cache
 
         self._sender, self._input_sender = utils._get_entity_pair(
             self.sender_id, entities, cache)
@@ -1149,7 +1157,7 @@ class Message(ChatGetter, SenderGetter, TLObject):
                         return bot
                     else:
                         try:
-                            return self._client._entity_cache.get(
+                            return self._client._mb_entity_cache.get(
                                 utils.resolve_id(self.via_bot_id)[0])._as_input_peer()
                         except AttributeError:
                             raise ValueError('No input sender') from None
